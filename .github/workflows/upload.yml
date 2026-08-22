@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'لینک فایلی که می‌خواهید آپلود کنید'
+        description: 'https://techcommunity.microsoft.com/t5/s/gxcuf89792/attachments/gxcuf89792/ExcelGeneral/149342/1/dynamic%20list%20excel%202016.xlsx'
         required: true
         type: string
       filename:
