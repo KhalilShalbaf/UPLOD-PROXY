@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'https://techcommunity.microsoft.com/t5/s/gxcuf89792/attachments/gxcuf89792/ExcelGeneral/149342/1/dynamic%20list%20excel%202016.xlsx'
+        description: 'LINK'
         required: true
         type: string
       filename:
