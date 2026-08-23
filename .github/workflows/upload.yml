@@ -1,4 +1,4 @@
-name: URL Upload Proxy
+name: Ultimate URL Upload Proxy
 
 on:
   workflow_dispatch:
@@ -11,47 +11,104 @@ on:
 jobs:
   download_and_upload:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write  # مجوز لازم برای آپلود در گیت‌هاب
+
     steps:
       - name: Setup Random Filename
         id: filename
         run: |
-          # استخراج نام اصلی از URL برای پیدا کردن پسوند
           ORIGINAL_NAME=$(basename "${{ github.event.inputs.url }}" | sed 's/?.*//' | sed 's/%20/ /g')
-          
-          # استخراج پسوند (قسمت بعد از آخرین نقطه)
           EXTENSION="${ORIGINAL_NAME##*.}"
-          
-          # اگر پسوندی پیدا نشد، از پسوند پیش‌فرض bin استفاده کن
           if [ "$EXTENSION" = "$ORIGINAL_NAME" ] || [ -z "$EXTENSION" ]; then
             EXTENSION="bin"
           fi
-          
-          # تولید یک عدد تصادفی ۶ رقمی (بین 100000 تا 999999)
           RANDOM_NUM=$(shuf -i 100000-999999 -n 1)
-          
-          # ساخت نام فایل جدید: عدد تصادفی + پسوند اصلی
           NEW_FILENAME="${RANDOM_NUM}.${EXTENSION}"
           
           echo "filename=$NEW_FILENAME" >> "$GITHUB_OUTPUT"
           echo "✅ نام فایل اصلی: $ORIGINAL_NAME"
           echo "✅ نام فایل جدید (تصادفی): $NEW_FILENAME"
 
-      - name: Download file from URL
+      - name: Download and Validate File
         run: |
           echo "در حال دانلود از: ${{ github.event.inputs.url }}"
           curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "${{ steps.filename.outputs.filename }}" "${{ github.event.inputs.url }}"
           
-          echo "=== بررسی فایل دانلود شده ==="
+          echo "=== بررسی فایل ==="
           ls -lh "${{ steps.filename.outputs.filename }}"
           file "${{ steps.filename.outputs.filename }}"
           
-          # بررسی حیاتی: اگر فایل HTML بود، یعنی لینک مستقیم نبوده
           if file "${{ steps.filename.outputs.filename }}" | grep -q "HTML"; then
             echo "::error::خطا: فایل دانلود شده یک صفحه وب (HTML) است! لطفاً لینک مستقیم دانلود را وارد کنید."
             exit 1
           fi
 
+      # ==========================================================
+      # روش ۱: آپلود در گیت‌هاب (مطمئن‌ترین روش، بدون مسدودی)
+      # ==========================================================
+      - name: Upload to GitHub Raw (Most Reliable)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "در حال آپلود در گیت‌هاب..."
+          mkdir ./git-repo
+          cd ./git-repo
+          git init
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          
+          cp "../${{ steps.filename.outputs.filename }}" .
+          echo "Uploaded via Proxy Workflow" > README.md
+          
+          git add .
+          git commit -m "Upload: ${{ steps.filename.outputs.filename }} - $(date)"
+          git branch -M proxy-uploads
+          git remote add origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
+          git push -f origin proxy-uploads
+          
+          echo "✅ لینک دانلود مستقیم از گیت‌هاب:"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/proxy-uploads/${{ steps.filename.outputs.filename }}"
+          echo "---------------------------------------------------"
+
+      # ==========================================================
+      # روش ۲: سرویس‌های خارجی (به عنوان زاپاس)
+      # ==========================================================
+      - name: Upload to transfer.sh (Developer Friendly)
+        continue-on-error: true
+        run: |
+          echo "=== transfer.sh ==="
+          # این سرویس بسیار پایدار است و مستقیماً لینک را برمی‌گرداند
+          curl -s -A "Mozilla/5.0" --upload-file "${{ steps.filename.outputs.filename }}" https://transfer.sh
+          echo ""
+          echo "---------------------------------------------------"
+
       - name: Upload to tmpfiles.org
         continue-on-error: true
-        run:
+        run: |
+          echo "=== tmpfiles.org ==="
+          RESPONSE=$(curl -s -A "Mozilla/5.0" -F "file=@${{ steps.filename.outputs.filename }}" https://tmpfiles.org/api/v1/upload)
+          # اضافه کردن /dl/ برای دریافت لینک دانلود مستقیم به جای صفحه وب
+          echo "$RESPONSE" | jq -r '.data.url' | sed 's|tmpfiles.org/|tmpfiles.org/dl/|'
+          echo ""
+          echo "---------------------------------------------------"
+
+      - name: Upload to file.io
+        continue-on-error: true
+        run: |
+          echo "=== file.io ==="
+          # file.io گاهی JSON و گاهی متن ساده برمی‌گرداند، هر دو را مدیریت می‌کنیم
+          RESPONSE=$(curl -s -A "Mozilla/5.0" -F "file=@${{ steps.filename.outputs.filename }}" https://file.io)
+          if echo "$RESPONSE" | jq -e '.link' > /dev/null 2>&1; then
+            echo "$RESPONSE" | jq -r '.link'
+          else
+            echo "$RESPONSE"
+          fi
+          echo ""
+          echo "---------------------------------------------------"
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "🎉 فرآیند با موفقیت کامل شد!"
+          echo "لینک گیت‌هاب (مطمئن‌ترین گزینه) در مرحله 'Upload to GitHub Raw' قرار دارد."
