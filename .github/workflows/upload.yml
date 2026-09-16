@@ -15,6 +15,13 @@ jobs:
       contents: write
 
     steps:
+      # ⚡ مرحله جدید: checkout کردن مخزن (الزامی برای git push)
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Setup Random Filename
         id: filename
         run: |
@@ -44,65 +51,67 @@ jobs:
           
           FILE_SIZE=$(stat -c%s "${{ steps.filename.outputs.filename }}" 2>/dev/null || echo "0")
           if [ "$FILE_SIZE" -lt 100 ]; then
-            echo "::error::خطا: فایل دانلود شده بسیار کوچک است ($FILE_SIZE بایت). ممکن است لینک اشتباه باشد."
+            echo "::error::خطا: فایل دانلود شده بسیار کوچک است ($FILE_SIZE بایت)."
             exit 1
           fi
           
           if file "${{ steps.filename.outputs.filename }}" | grep -qi "HTML"; then
-            echo "::error::خطا: فایل دانلود شده یک صفحه وب (HTML) است! لطفاً لینک مستقیم دانلود را وارد کنید."
+            echo "::error::خطا: فایل دانلود شده یک صفحه وب (HTML) است!"
             exit 1
           fi
 
       # ==========================================================
-      # روش ۱: آپلود در گیت‌هاب (مطمئن‌ترین روش، بدون مسدودی)
+      # روش ۱: آپلود در گیت‌هاب (با checkout + PAT)
       # ==========================================================
       - name: Upload to GitHub Raw (Most Reliable)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+          BRANCH: proxy-uploads
+          FILENAME: ${{ steps.filename.outputs.filename }}
         run: |
           echo "در حال آپلود در گیت‌هاب..."
-          mkdir -p ./git-repo
-          cd ./git-repo
-          git init
+          
+          # استفاده از پوشه فعلی (checkout شده) به جای ساخت پوشه جدید
+          mkdir -p uploads
+          cp "${FILENAME}" uploads/
+          echo "Uploaded via Proxy Workflow on $(date)" > uploads/README.md
+          
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
           
-          cp "../${{ steps.filename.outputs.filename }}" .
-          echo "Uploaded via Proxy Workflow" > README.md
+          git add uploads/
+          git commit -m "Upload: ${FILENAME} - $(date '+%Y-%m-%d %H:%M:%S')"
           
-          git add .
-          git commit -m "Upload: ${{ steps.filename.outputs.filename }} - $(date)"
-          git branch -M proxy-uploads
-          git remote add origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
-          git push -f origin proxy-uploads
+          # ایجاد یا سوئیچ به برنچ
+          git checkout -B "${BRANCH}"
           
-          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/proxy-uploads/${{ steps.filename.outputs.filename }}"
+          # push با توکن
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git
+          git push -f origin "${BRANCH}" || {
+            echo "::warning::Push با GITHUB_TOKEN شکست خورد، تلاش مجدد..."
+            # اگر PAT تنظیم نشده باشد، این بخش fail می‌شود
+            exit 1
+          }
+          
+          RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/uploads/${FILENAME}"
           echo ""
           echo "=========================================="
           echo "✅ لینک دانلود مستقیم از گیت‌هاب:"
-          echo "$RAW_URL"
+          echo "${RAW_URL}"
           echo "=========================================="
 
       # ==========================================================
-      # روش ۲: keep.sh (جایگزین فعال transfer.sh)
-      # ==========================================================
-      - name: Upload to keep.sh (Transfer.sh Replacement)
-        continue-on-error: true
-        run: |
-          echo "=== keep.sh ==="
-          RESULT=$(curl -s -A "Mozilla/5.0" --upload-file "${{ steps.filename.outputs.filename }}" https://keep.sh)
-          echo "$RESULT"
-          echo ""
-          echo "---------------------------------------------------"
-
-      # ==========================================================
-      # روش ۳: tmpfiles.org
+      # روش ۲: tmpfiles.org (پایدارترین سرویس باقی‌مانده)
       # ==========================================================
       - name: Upload to tmpfiles.org
         continue-on-error: true
         run: |
           echo "=== tmpfiles.org ==="
-          RESPONSE=$(curl -s -A "Mozilla/5.0" -F "file=@${{ steps.filename.outputs.filename }}" https://tmpfiles.org/api/v1/upload)
+          RESPONSE=$(curl -s -A "Mozilla/5.0" \
+                    --connect-timeout 15 --max-time 120 \
+                    -F "file=@${{ steps.filename.outputs.filename }}" \
+                    https://tmpfiles.org/api/v1/upload)
           DOWNLOAD_LINK=$(echo "$RESPONSE" | jq -r '.data.url // empty' 2>/dev/null | sed 's|tmpfiles.org/|tmpfiles.org/dl/|')
           if [ -n "$DOWNLOAD_LINK" ]; then
             echo "📎 $DOWNLOAD_LINK"
@@ -113,31 +122,41 @@ jobs:
           echo "---------------------------------------------------"
 
       # ==========================================================
-      # روش ۴: file.io
-      # ==========================================================
-      - name: Upload to file.io
-        continue-on-error: true
-        run: |
-          echo "=== file.io ==="
-          RESPONSE=$(curl -s -A "Mozilla/5.0" -F "file=@${{ steps.filename.outputs.filename }}" https://file.io)
-          LINK=$(echo "$RESPONSE" | jq -r '.link // empty' 2>/dev/null)
-          if [ -n "$LINK" ]; then
-            echo "📎 $LINK"
-          else
-            echo "⚠️ پاسخ سرور: $RESPONSE"
-          fi
-          echo ""
-          echo "---------------------------------------------------"
-
-      # ==========================================================
-      # روش ۵: 0x0.st (سبک و سریع)
+      # روش ۳: 0x0.st (سبک و سریع)
       # ==========================================================
       - name: Upload to 0x0.st
         continue-on-error: true
         run: |
           echo "=== 0x0.st ==="
-          RESULT=$(curl -s -A "Mozilla/5.0" -F "file=@${{ steps.filename.outputs.filename }}" https://0x0.st)
-          echo "📎 $RESULT"
+          RESULT=$(curl -s -A "Mozilla/5.0" \
+                   --connect-timeout 15 --max-time 120 \
+                   -F "file=@${{ steps.filename.outputs.filename }}" \
+                   https://0x0.st)
+          if [ -n "$RESULT" ] && echo "$RESULT" | grep -q "^https://"; then
+            echo " $RESULT"
+          else
+            echo "️ پاسخ سرور: $RESULT"
+          fi
+          echo ""
+          echo "---------------------------------------------------"
+
+      # ==========================================================
+      # روش ۴: catbox.moe (جایگزین پایدار)
+      # ==========================================================
+      - name: Upload to catbox.moe
+        continue-on-error: true
+        run: |
+          echo "=== catbox.moe ==="
+          RESULT=$(curl -s -A "Mozilla/5.0" \
+                   --connect-timeout 15 --max-time 120 \
+                   -F "fileToUpload=@${{ steps.filename.outputs.filename }}" \
+                   -F "reqtype=fileupload" \
+                   https://catbox.moe/user/api.php)
+          if [ -n "$RESULT" ] && echo "$RESULT" | grep -q "^https://"; then
+            echo "📎 $RESULT"
+          else
+            echo "⚠️ پاسخ سرور: $RESULT"
+          fi
           echo ""
           echo "---------------------------------------------------"
 
@@ -149,7 +168,7 @@ jobs:
           echo ""
           echo " فرآیند با موفقیت کامل شد!"
           echo ""
-          echo " لینک گیت‌هاب (مطمئن‌ترین گزینه):"
-          echo "https://raw.githubusercontent.com/${{ github.repository }}/proxy-uploads/${{ steps.filename.outputs.filename }}"
+          echo "📌 لینک گیت‌هاب (مطمئن‌ترین گزینه):"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/proxy-uploads/uploads/${{ steps.filename.outputs.filename }}"
           echo ""
           echo "💡 سایر لینک‌ها در مراحل بالا نمایش داده شده‌اند."
