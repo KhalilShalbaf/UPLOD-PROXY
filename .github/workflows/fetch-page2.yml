@@ -1,0 +1,81 @@
+name: Fetch Blocked Page
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'آدرس صفحه مسدود شده'
+        required: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lynx pandoc
+
+      - name: Download page
+        run: |
+          curl -sL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+               "${{ inputs.url }}" -o page.html
+          echo "حجم فایل دانلود شده:"
+          ls -lh page.html
+
+      - name: Print readable text in log
+        run: |
+          echo "============================================="
+          echo "متن کامل صفحه (قابل خواندن):"
+          echo "============================================="
+          lynx -dump -nolist -width=100 page.html
+          echo "============================================="
+
+      - name: Save Markdown to branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir web-archive
+          cd web-archive
+          git init
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+
+          pandoc -f html -t gfm ../page.html -o page.md
+
+          echo "# آرشیو صفحه" > README.md
+          echo "" >> README.md
+          echo "**آدرس منبع:** ${{ inputs.url }}" >> README.md
+          echo "" >> README.md
+          echo "**تاریخ دریافت:** $(date)" >> README.md
+          echo "" >> README.md
+          echo "---" >> README.md
+          echo "" >> README.md
+          cat page.md >> README.md
+
+          git add .
+          git commit -m "Archive: $(date)"
+          git branch -M web-archive
+
+          # پوش به همان ریپازیتوری فعلی (UPLOD-PROXY)
+          git remote add origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
+          git push -f origin web-archive
+
+      - name: Show links
+        run: |
+          echo "============================================="
+          echo "✅ صفحه با موفقیت آرشیو شد!"
+          echo "============================================="
+          echo ""
+          echo "📖 مشاهده در گیت‌هاب (رندر شده):"
+          echo "https://github.com/${{ github.repository }}/tree/web-archive"
+          echo ""
+          echo "📄 فایل Markdown مستقیم:"
+          echo "https://github.com/${{ github.repository }}/blob/web-archive/README.md"
+          echo ""
+          echo "📥 دانلود HTML خام:"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/web-archive/page.html"
+          echo "============================================="
