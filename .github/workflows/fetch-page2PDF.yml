@@ -1,0 +1,198 @@
+name: Fetch Blocked Page to PDF
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'آدرس صفحه مسدود شده'
+        required: true
+
+jobs:
+  fetch_pdf:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Puppeteer
+        run: npm install puppeteer
+
+      - name: Generate folder name from URL
+        id: folder
+        run: |
+          # استخراج دامنه از URL
+          DOMAIN=$(echo "${{ inputs.url }}" | sed -E 's|https?://||' | cut -d'/' -f1 | sed 's/^www\.//')
+          # تاریخ و ساعت برای یکتا بودن
+          TIMESTAMP=$(date +%Y-%m-%d_%H%M%S)
+          # نام پوشه: دامنه_تاریخ
+          FOLDER="${DOMAIN}_${TIMESTAMP}"
+          echo "folder=$FOLDER" >> $GITHUB_OUTPUT
+          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
+          echo "پوشه: $FOLDER"
+
+      - name: Render page and save as PDF
+        run: |
+          mkdir -p output
+          cat > render.js << 'SCRIPT'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+
+          (async () => {
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
+            });
+            const page = await browser.newPage();
+            await page.setViewport({ width: 1280, height: 900 });
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+            console.log('در حال بارگذاری صفحه...');
+            await page.goto(process.env.TARGET_URL, {
+              waitUntil: 'networkidle2',
+              timeout: 60000
+            });
+
+            await new Promise(r => setTimeout(r, 3000));
+
+            // اسکرول برای لود تصاویر lazy-load
+            await page.evaluate(async () => {
+              await new Promise((resolve) => {
+                let totalHeight = 0;
+                const distance = 300;
+                const timer = setInterval(() => {
+                  window.scrollBy(0, distance);
+                  totalHeight += distance;
+                  if (totalHeight >= document.body.scrollHeight) {
+                    clearInterval(timer);
+                    resolve();
+                  }
+                }, 100);
+              });
+            });
+
+            await new Promise(r => setTimeout(r, 3000));
+            await page.evaluate(() => window.scrollTo(0, 0));
+
+            // گرفتن عنوان صفحه
+            const title = await page.title();
+            fs.writeFileSync('output/title.txt', title);
+
+            console.log('در حال ساخت PDF...');
+            await page.pdf({
+              path: 'output/page.pdf',
+              format: 'A4',
+              printBackground: true,
+              margin: { top: '10mm', bottom: '10mm', left: '10mm', right: '10mm' }
+            });
+
+            await page.screenshot({ path: 'output/page.png', fullPage: true });
+
+            const text = await page.evaluate(() => document.body.innerText);
+            fs.writeFileSync('output/page.txt', text);
+
+            await browser.close();
+            console.log('✅ تمام شد!');
+          })();
+          SCRIPT
+
+          TARGET_URL="${{ inputs.url }}" node render.js
+
+      - name: Verify files
+        run: |
+          echo "=== فایل‌های تولید شده ==="
+          ls -lh output/
+          echo "عنوان صفحه:"
+          cat output/title.txt
+          echo "========================="
+
+      - name: Push to web-archive branch (per-site folder)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FOLDER: ${{ steps.folder.outputs.folder }}
+          DOMAIN: ${{ steps.folder.outputs.domain }}
+          PAGE_URL: ${{ inputs.url }}
+        run: |
+          # کلون کردن branch موجود (اگر وجود دارد) تا آرشیوهای قبلی حفظ شوند
+          git clone --depth 1 --branch web-archive \
+            https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git archive 2>/dev/null || {
+            # اگر branch وجود نداشت، یک repo جدید بساز
+            mkdir archive
+            cd archive
+            git init
+            git checkout -b web-archive
+            cd ..
+          }
+
+          cd archive
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+
+          # ساخت پوشه مخصوص این سایت
+          mkdir -p "$FOLDER"
+          cp ../output/page.pdf "$FOLDER/"
+          cp ../output/page.png "$FOLDER/"
+          cp ../output/page.txt "$FOLDER/"
+
+          TITLE=$(cat ../output/title.txt)
+
+          # ساخت README داخل پوشه سایت
+          cat > "$FOLDER/README.md" << EOF
+          # $TITLE
+
+          **منبع:** $PAGE_URL
+
+          **دامنه:** $DOMAIN
+
+          **تاریخ آرشیو:** $(date)
+
+          ## فایل‌ها:
+          - [📄 دانلود PDF](page.pdf)
+          - [🖼️ تصویر کامل صفحه](page.png)
+          - [📝 متن ساده](page.txt)
+          EOF
+
+          # به‌روزرسانی فهرست کلی (INDEX.md)
+          if [ ! -f INDEX.md ]; then
+            echo "# 📚 فهرست صفحات آرشیو شده" > INDEX.md
+            echo "" >> INDEX.md
+            echo "| تاریخ | دامنه | عنوان | لینک |" >> INDEX.md
+            echo "|---|---|---|---|" >> INDEX.md
+          fi
+          echo "| $(date +%Y-%m-%d\ %H:%M) | $DOMAIN | $TITLE | [مشاهده]($FOLDER/) |" >> INDEX.md
+
+          git add .
+          git commit -m "Archive: $DOMAIN - $(date)"
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git 2>/dev/null || \
+            git remote add origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
+          git push origin web-archive
+
+      - name: Show download links
+        env:
+          FOLDER: ${{ steps.folder.outputs.folder }}
+        run: |
+          echo "============================================="
+          echo "✅ صفحه در پوشه اختصاصی آرشیو شد!"
+          echo "============================================="
+          echo ""
+          echo "📁 پوشه این سایت: $FOLDER"
+          echo ""
+          echo "📄 دانلود PDF:"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/web-archive/$FOLDER/page.pdf"
+          echo ""
+          echo "🖼️ تصویر کامل:"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/web-archive/$FOLDER/page.png"
+          echo ""
+          echo "📝 متن ساده:"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/web-archive/$FOLDER/page.txt"
+          echo ""
+          echo "📚 فهرست همه صفحات آرشیو شده:"
+          echo "https://github.com/${{ github.repository }}/blob/web-archive/INDEX.md"
+          echo ""
+          echo "📂 مشاهده همه پوشه‌ها:"
+          echo "https://github.com/${{ github.repository }}/tree/web-archive"
+          echo "============================================="
